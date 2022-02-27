@@ -1,14 +1,13 @@
 package downloader
 
 import (
-	"context"
-	"io"
+	"fmt"
 
-	"github.com/abihf/gonzb/internal/decoder"
 	"github.com/abihf/gonzb/internal/nntp"
 )
 
 type Worker struct {
+	id   int32
 	conn *nntp.Conn
 }
 
@@ -16,73 +15,51 @@ func (w *Worker) Close() error {
 	return w.conn.Close()
 }
 
-type Job struct {
-	Ctx     context.Context
-	Group   string
-	Article string
-	Decoder decoder.Decoder
-	Writer  io.WriteCloser
-
-	cancelled bool
-	done      chan struct{}
-	Err       error
-}
-
-func (w *Worker) Consume(c chan *Job) {
+func (w *Worker) Consume(q *Queue) {
+	defer w.conn.Idle()
 	for {
-		select {
-		case <-w.conn.Closed:
+		job := q.Get()
+		if job == nil {
+			fmt.Printf("no more job for worker %d, mark connection as idle\n", w.id)
 			return
-
-		case job := <-c:
-			if job == nil {
-				return
-			}
-			go func() {
-				job.Err = w.Process(job)
-				close(job.done)
-			}()
-			select {
-			case <-job.Ctx.Done():
-				job.cancelled = true
-			case <-job.done:
-			}
 		}
+
+		fmt.Printf("downloading %s[%d] via %s\n", job.Name, job.Segment.Number, w.conn.Name())
+		job.OnDone(w.Process(job))
+		fmt.Printf("downloaded %s[%d]\n", job.Name, job.Segment.Number)
 	}
 }
 
 func (w *Worker) Process(j *Job) error {
-	if j.cancelled {
-		return j.Ctx.Err()
-	}
-	_, err := w.conn.Group(j.Group)
-	if err != nil {
-		return err
-	}
-
-	if j.cancelled {
-		return j.Ctx.Err()
-	}
-	reader, err := w.conn.Body(j.Article)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	go func() {
-		select {
-		case <-j.Ctx.Done():
-			reader.Close()
-		case <-j.done:
-			// do nothing
+	ok := false
+	var err error
+	for _, group := range j.Groups {
+		// if j.cancelled {
+		// 	return j.Ctx.Err()
+		// }
+		_, err = w.conn.Group(group)
+		if err == nil {
+			ok = true
+			break
 		}
-	}()
-
-	if j.cancelled {
-		return j.Ctx.Err()
 	}
-	_, err = io.Copy(j.Writer, j.Decoder(reader))
-	if err != nil {
+	if !ok {
 		return err
 	}
-	return j.Writer.Close()
+
+	// if j.cancelled {
+	// 	return j.Ctx.Err()
+	// }
+	return w.conn.Body("<"+j.Segment.ID+">", func(b nntp.Body) error {
+		return j.Decode(j.Buff, b)
+		// if err != nil {
+		// 	return fmt.Errorf("failed to decode segment %d: %w", j.Segment.Number, err)
+		// }
+		// _, err = j.Writer.Seek(int64(j.Offset), io.SeekStart)
+		// if err != nil {
+		// 	return fmt.Errorf("can not seek to offset %d %w", j.Offset, err)
+		// }
+		// _, err = j.Writer.Write(j.Buff)
+		// return err
+	})
 }

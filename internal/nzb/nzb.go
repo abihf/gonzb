@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"io"
 	"regexp"
+	"strconv"
 )
 
 type Nzb struct {
@@ -15,18 +16,30 @@ type File struct {
 	XMLName  xml.Name   `xml:"file"`
 	Poster   string     `xml:"poster,attr"`
 	Date     uint32     `xml:"date,attr"`
-	Subject  string     `xml:"subject:attr"`
+	Subject  string     `xml:"subject,attr"`
 	Groups   []string   `xml:"groups>group"`
 	Segments []*Segment `xml:"segments>segment"`
 }
 
+var fileNameMatcher = regexp.MustCompile(`"([^"]+)"`)
+
 func (f *File) FileName() string {
-	re := regexp.MustCompile(`"([^"]+")`)
-	match := re.FindStringSubmatch(f.Subject)
+	match := fileNameMatcher.FindStringSubmatch(f.Subject)
 	if len(match) > 1 {
 		return match[1]
 	}
 	return f.Subject
+}
+
+var fileSizeMatcher = regexp.MustCompile(`\(.*?\).*?(\d+)(\s|$)`)
+
+func (f *File) FileSize() (int64, bool) {
+	match := fileSizeMatcher.FindStringSubmatch(f.Subject)
+	if len(match) > 1 {
+		s, err := strconv.ParseInt(match[1], 10, 64)
+		return s, err == nil
+	}
+	return 0, false
 }
 
 type Segment struct {

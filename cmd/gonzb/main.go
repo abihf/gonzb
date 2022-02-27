@@ -1,15 +1,27 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
 
+	"github.com/abihf/gonzb/internal/downloader"
 	"github.com/abihf/gonzb/internal/nzb"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
-	file, _ := os.Open("test_download_1000MB.nzb")
+	file, err := os.Open("test.nzb")
+	if err != nil {
+		panic(err)
+	}
 	defer file.Close()
 	n, _ := nzb.Parse(file)
-	fmt.Printf("Nzb %v\n", n.Files[0].Segments[0].ID)
+	var conf downloader.Config
+	cFile, _ := os.Open("config.yml")
+	yaml.NewDecoder(cFile).Decode(&conf)
+	d := downloader.New(&conf)
+	err = d.Download(context.TODO(), n)
+	if err != nil {
+		panic(err)
+	}
 }

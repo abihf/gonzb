@@ -1,80 +1,196 @@
 package nntp
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"net/textproto"
 	"sync"
+	"time"
+
+	"github.com/marusama/semaphore/v2"
 )
 
+type Config struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+	Auth *Auth  `yaml:"auth"`
+
+	MaxConn int `yaml:"maxConn"`
+
+	TLS    bool     `yaml:"tls"`
+	Cipher []string `yaml:"cipher"`
+}
+
 type Client struct {
-	Dialer net.Dialer
-	Host   string
-	Port   int
-	TLS    bool
-
+	Config
+	Dialer    net.Dialer
 	TLSConfig tls.Config
-	MaxConn   int
 
-	Closed bool
+	idleConns map[*Conn]bool
+	mutex     sync.RWMutex
 
-	cons  map[*Conn]bool
-	mutex sync.Mutex
+	busyCount int
+	sem       semaphore.Semaphore
+	err       error
+}
+
+type Auth struct {
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+}
+
+func New(conf Config) *Client {
+	c := &Client{
+		Config: conf,
+		sem:    semaphore.New(5),
+
+		idleConns: map[*Conn]bool{},
+	}
+
+	if len(conf.Cipher) > 0 {
+		codes := []uint16{}
+		suites := tls.CipherSuites()
+		suites = append(suites, tls.InsecureCipherSuites()...)
+
+		for _, c := range conf.Cipher {
+			for _, s := range suites {
+				if s.Name == c {
+					codes = append(codes, s.ID)
+				}
+			}
+		}
+		c.TLSConfig.CipherSuites = codes
+	}
+
+	return c
 }
 
 var ErrLimitExceeded = fmt.Errorf("Maximum client connection exceeded")
 
-func (c *Client) Connect(ctx context.Context) (*Conn, error) {
+func (c *Client) getIdleConnection(n int) (res []*Conn) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if len(c.cons) >= c.MaxConn {
-		return nil, ErrLimitExceeded
-	}
-
-	var inner io.ReadWriteCloser
-	tcpConn, err := c.Dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", c.Host, c.Port))
-
-	if err != nil {
-		return nil, err
-	}
-	if c.TLS {
-		if c.TLSConfig.ServerName == "" {
-			c.TLSConfig.ServerName = c.Host
+	for conn := range c.idleConns {
+		res = append(res, conn)
+		delete(c.idleConns, conn)
+		c.busyCount++
+		n--
+		if n <= 0 {
+			return
 		}
-		tlsCon := tls.Client(tcpConn, &c.TLSConfig)
-		tlsCon.HandshakeContext(ctx)
-		inner = tlsCon
-	} else {
-		inner = tcpConn
 	}
+	return
+}
 
-	conn := &Conn{client: c, Closed: make(chan interface{}, 1)}
-	onClose := func(err error) error {
-		conn.Closed <- nil
-		c.mutex.Lock()
-		defer c.mutex.Unlock()
-		delete(c.cons, conn)
-		return err
+func (c *Client) ConnectN(max int) (res []*Conn, errors []error) {
+	iddleConns := c.getIdleConnection(max)
+	res = append(res, iddleConns...)
+	if len(res) >= max || len(res) >= c.MaxConn {
+		return
 	}
+	max -= len(res)
 
-	conn.Conn = textproto.NewConn(&closeInjector{inner, onClose})
-	c.cons[conn] = true
-	return conn, nil
+	var wg sync.WaitGroup
+	for i := 0; i < max; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			if err := c.sem.Acquire(nil, 1); err != nil {
+				errors = append(errors, err)
+				return
+			}
+			defer c.sem.Release(1)
+
+			cLen := c.Len()
+			if cLen >= c.MaxConn {
+				return
+			}
+
+			fmt.Printf("connecting to %s (%d/%d)\n", c.Host, cLen, c.MaxConn)
+			var inner io.ReadWriteCloser
+			tmpConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port))
+			if err != nil {
+				errors = append(errors, err)
+				return
+			}
+			tcpConn := tmpConn.(*net.TCPConn)
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(10 * time.Second)
+			tcpConn.SetLinger(0)
+
+			if c.TLS {
+				if c.TLSConfig.ServerName == "" {
+					c.TLSConfig.ServerName = c.Host
+				}
+
+				tlsCon := tls.Client(tcpConn, &c.TLSConfig)
+				inner = tlsCon
+			} else {
+				inner = tcpConn
+			}
+
+			conn := &Conn{client: c, Closed: make(chan struct{}, 1)}
+			onClose := func(err error) error {
+				close(conn.Closed)
+				c.mutex.Lock()
+				defer c.mutex.Unlock()
+				if _, ok := c.idleConns[conn]; ok {
+					delete(c.idleConns, conn)
+				} else {
+					c.busyCount--
+				}
+				fmt.Printf("disconnected from %s (%d/%d)\n", c.Host, c.busyCount+len(c.idleConns), c.MaxConn)
+				return err
+			}
+
+			conn.Conn = textproto.NewConn(&closeInjector{inner, onClose})
+
+			_, _, err = conn.ReadCodeLine(200)
+			if err != nil {
+				conn.Close()
+				errors = append(errors, err)
+				return
+			}
+
+			if c.Auth != nil {
+				err = conn.Auth(c.Auth)
+				if err != nil {
+					conn.Close()
+					errors = append(errors, err)
+					return
+				}
+			}
+			func() {
+				c.mutex.Lock()
+				defer c.mutex.Unlock()
+				c.busyCount++
+				res = append(res, conn)
+				errors = append(errors, err)
+			}()
+
+		}(i)
+	}
+	wg.Wait()
+	return
 }
 
 func (c *Client) Len() int {
-	return len(c.cons)
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.busyCount + len(c.idleConns)
 }
 
-func (c *Client) CloseAll() {
-	for conn := range c.cons {
-		go conn.Close()
-	}
-}
+// func (c *Client) CloseIdle() {
+// 	c.mutex.Lock()
+// 	defer c.mutex.Unlock()
+// 	for conn := range c.idleConns {
+// 		go conn.Shutdown()
+// 	}
+// }
 
 type closeInjector struct {
 	io.ReadWriteCloser
