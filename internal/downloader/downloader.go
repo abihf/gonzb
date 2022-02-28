@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	semaphore "github.com/marusama/semaphore/v2"
 
@@ -17,29 +18,30 @@ import (
 	"github.com/abihf/gonzb/internal/nntp"
 	"github.com/abihf/gonzb/internal/nzb"
 	"github.com/abihf/gonzb/internal/reporter"
+	"github.com/rs/zerolog/log"
 	syscall "golang.org/x/sys/unix"
 )
 
 type Downloader struct {
-	r *reporter.Reporter
-	c []*nntp.Client
-	q Queue
-	m sync.Mutex
+	reporter *reporter.Reporter
+	clients  []*nntp.Client
+	queue    Queue
 
+	mutex sync.Mutex
+	sem   semaphore.Semaphore
+
+	resizer  bool
 	workerId int32
-	sem      semaphore.Semaphore
-
-	// mmapSem semaphore.Semaphore
-
+	qEmpty   chan bool
 }
 
 func New(conf *Config) *Downloader {
-	d := &Downloader{}
+	d := &Downloader{qEmpty: make(chan bool)}
 
 	qSize := 0
 	for _, s := range conf.Servers {
 		qSize += s.MaxConn
-		d.c = append(d.c, nntp.New(s))
+		d.clients = append(d.clients, nntp.New(s))
 	}
 	d.sem = semaphore.New(qSize)
 
@@ -50,50 +52,41 @@ func (d *Downloader) Download(ctx context.Context, n *nzb.Nzb) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	nd := nzbDownloader{
-		Downloader: d,
-		n:          n,
-		err:        make(chan error),
-	}
-
-	return nd.download(ctx)
-}
-
-type nzbDownloader struct {
-	*Downloader
-	n   *nzb.Nzb
-	err chan error
-}
-
-func (d *nzbDownloader) download(ctx context.Context) error {
+	errChan := make(chan error)
 	go func() {
-		for _, file := range d.n.Files {
+		var wg sync.WaitGroup
+		for _, file := range n.Files {
 			if strings.HasSuffix(file.FileName(), ".par2") {
 				continue
 			}
-			c := make(chan bool)
-			go d.downloadFile(ctx, file, c)
-			<-c
+			done := make(chan bool)
+			wg.Add(1)
+			go func(file *nzb.File) {
+				defer wg.Done()
+				d.downloadFile(ctx, file, done, errChan)
+			}(file)
+			<-done
 		}
-		close(d.err)
+		wg.Wait()
+		close(errChan)
 	}()
 
 	for {
 		select {
-		case err := <-d.err:
+		case err := <-errChan:
 			return err
-
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-func (d *nzbDownloader) downloadFile(ctx context.Context, nzbFile *nzb.File, c chan bool) {
+func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File, done chan bool, errChan chan error) {
 	fileName := nzbFile.FileName()
+	logger := log.With().Str("file", fileName).Logger()
 	file, err := os.Create("files/" + fileName)
 	if err != nil {
-		d.err <- fmt.Errorf("can not create file %s: %w", fileName, err)
+		errChan <- fmt.Errorf("can not create file %s: %w", fileName, err)
 		return
 	}
 	defer file.Close()
@@ -105,13 +98,13 @@ func (d *nzbDownloader) downloadFile(ctx context.Context, nzbFile *nzb.File, c c
 
 	err = file.Truncate(size)
 	if err != nil {
-		d.err <- fmt.Errorf("can not grow file %s to %d: %w", fileName, size, err)
+		errChan <- fmt.Errorf("can not grow file %s to %d: %w", fileName, size, err)
 		return
 	}
 
 	buff, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
-		d.err <- fmt.Errorf("can not mmap file %s: %w", fileName, err)
+		errChan <- fmt.Errorf("can not mmap file %s: %w", fileName, err)
 		return
 	}
 	defer syscall.Munmap(buff)
@@ -122,61 +115,103 @@ func (d *nzbDownloader) downloadFile(ctx context.Context, nzbFile *nzb.File, c c
 	wg.Add(len(nzbFile.Segments))
 
 	for _, segment := range nzbFile.Segments {
+		slog := logger.With().Uint32("seg", segment.Number).Logger()
 		err := d.sem.Acquire(ctx, 1)
 		if err != nil {
-			close(c)
-			d.err <- fmt.Errorf("can not acquire semaphore for %s[%d]: %w", fileName, segment.Number, err)
+			close(done)
+			errChan <- fmt.Errorf("can not acquire semaphore for %s[%d]: %w", fileName, segment.Number, err)
 			return
 		}
 
-		fmt.Printf("queueing %s[%d]\n", fileName, segment.Number)
+		slog.Debug().Msg("queueing")
 		j := &Job{
 			Name:    fileName,
 			Groups:  nzbFile.Groups,
 			Segment: segment,
 			Decode:  yenc.Decode,
-			Buff:    buff[offset : offset+segment.Bytes],
+			Buff:    buff,
 
 			OnDone: func(e error) {
 				d.sem.Release(1)
 				wg.Done()
 				if err != nil {
-					d.err <- e
+					errChan <- e
 				}
 			},
 		}
-		d.q.Add(j)
-		go d.GrowWorker()
+		d.queue.Add(j)
+		d.GrowWorker()
 		offset += segment.Bytes
 	}
 
-	close(c)
+	close(done)
 	wg.Wait()
+	logger.Info().Msg("file downloaded")
 }
 
 func (d *Downloader) GrowWorker() {
-	d.m.Lock()
-	defer d.m.Unlock()
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
 
-	qLen := d.q.Len()
+	if d.resizer || d.queue.Len() == 0 {
+		return
+	}
 
-	for _, c := range d.c {
-		// todo calculate weight
-		size := qLen / len(d.c)
-		if size < 1 {
-			size = 1
-		}
-		conns, errs := c.ConnectN(size)
-		for _, err := range errs {
-			if err != nil {
-				fmt.Printf("connection failed: %v\n", err)
+	d.resizer = true
+	go d.runResizer()
+
+	ticker := time.NewTicker(10 * time.Second)
+	go func() {
+		for {
+			<-ticker.C
+			if !d.runResizer() {
+				ticker.Stop()
+				return
 			}
 		}
-		for _, conn := range conns {
-			id := atomic.AddInt32(&d.workerId, 1)
-			worker := &Worker{id, conn}
-			fmt.Printf("creating worker %d from %s\n", id, c.Host)
-			go worker.Consume(&d.q)
+	}()
+}
+
+func (d *Downloader) runResizer() bool {
+	d.mutex.Lock()
+	qLen := d.queue.Len()
+	if qLen <= 0 {
+		d.resizer = false
+		d.mutex.Unlock()
+		d.qEmpty <- true
+		return false
+	}
+	d.mutex.Unlock()
+
+	for _, c := range d.clients {
+		qLen -= c.BusyLen()
+	}
+
+	cLen := len(d.clients)
+	lastIndex := 0
+	for qLen > 0 {
+		batch := qLen / cLen
+		if batch < 1 {
+			batch = 1
+		}
+		for i := 0; i < cLen; i++ {
+			c := d.clients[lastIndex]
+			lastIndex = (lastIndex + 1) % cLen
+
+			conns, errs := c.ConnectN(batch)
+			qLen -= len(conns)
+			for _, err := range errs {
+				if err != nil {
+					log.Error().Stack().Err(err).Str("host", c.Host).Msg("connection failed")
+				}
+			}
+			for _, conn := range conns {
+				id := atomic.AddInt32(&d.workerId, 1)
+				worker := &Worker{id, conn}
+				log.Debug().Int32("id", id).Str("host", c.Host).Msg("creating worker")
+				go worker.Consume(&d.queue)
+			}
 		}
 	}
+	return true
 }

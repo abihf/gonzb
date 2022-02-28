@@ -1,9 +1,8 @@
 package downloader
 
 import (
-	"fmt"
-
 	"github.com/abihf/gonzb/internal/nntp"
+	"github.com/rs/zerolog/log"
 )
 
 type Worker struct {
@@ -20,30 +19,21 @@ func (w *Worker) Consume(q *Queue) {
 	for {
 		job := q.Get()
 		if job == nil {
-			fmt.Printf("no more job for worker %d, mark connection as idle\n", w.id)
+			log.Debug().Int32("id", w.id).Msg("no more job for worker, mark connection as idle")
 			return
 		}
+		logger := log.With().Str("file", job.Name).Uint32("seg", job.Segment.Number).Str("server", w.conn.Name()).Logger()
 
-		fmt.Printf("downloading %s[%d] via %s\n", job.Name, job.Segment.Number, w.conn.Name())
+		logger.Debug().Msg("downloading")
 		job.OnDone(w.Process(job))
-		fmt.Printf("downloaded %s[%d]\n", job.Name, job.Segment.Number)
+		logger.Debug().Msg("downloaded")
 	}
 }
 
 func (w *Worker) Process(j *Job) error {
-	ok := false
 	var err error
-	for _, group := range j.Groups {
-		// if j.cancelled {
-		// 	return j.Ctx.Err()
-		// }
-		_, err = w.conn.Group(group)
-		if err == nil {
-			ok = true
-			break
-		}
-	}
-	if !ok {
+	_, err = w.conn.Groups(j.Groups)
+	if err != nil {
 		return err
 	}
 
@@ -52,14 +42,5 @@ func (w *Worker) Process(j *Job) error {
 	// }
 	return w.conn.Body("<"+j.Segment.ID+">", func(b nntp.Body) error {
 		return j.Decode(j.Buff, b)
-		// if err != nil {
-		// 	return fmt.Errorf("failed to decode segment %d: %w", j.Segment.Number, err)
-		// }
-		// _, err = j.Writer.Seek(int64(j.Offset), io.SeekStart)
-		// if err != nil {
-		// 	return fmt.Errorf("can not seek to offset %d %w", j.Offset, err)
-		// }
-		// _, err = j.Writer.Write(j.Buff)
-		// return err
 	})
 }

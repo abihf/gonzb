@@ -14,8 +14,6 @@ type Job struct {
 	Segment *nzb.Segment
 	Decode  decoder.Decoder
 	Buff    []byte
-	// Offset  uint32
-	// Done    chan error
 
 	OnDone func(error)
 

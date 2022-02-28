@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/textproto"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -15,6 +14,8 @@ type Conn struct {
 
 	mutex  sync.Mutex
 	Closed chan struct{}
+
+	group *Group
 
 	busy        bool
 	shutingDown bool
@@ -114,6 +115,26 @@ type Group struct {
 	High   int
 }
 
+func (c *Conn) Groups(groups []string) (*Group, error) {
+	if c.group != nil {
+		for _, g := range groups {
+			if g == c.group.Name {
+				return c.group, nil
+			}
+		}
+	}
+
+	var err error
+	var g *Group
+	for _, name := range groups {
+		g, err = c.Group(name)
+		if err == nil {
+			return g, nil
+		}
+	}
+	return nil, err
+}
+
 func (c *Conn) Group(group string) (*Group, error) {
 	done, ok := c.startWork()
 	if !ok {
@@ -128,31 +149,34 @@ func (c *Conn) Group(group string) (*Group, error) {
 	c.StartResponse(id)
 	defer c.EndResponse(id)
 
-	_, msg, err := c.ReadResponse(211)
+	_, _, err = c.ReadResponse(211)
 	if err != nil {
 		return nil, err
 	}
+	c.group = &Group{
+		Name: group,
+	}
+	return c.group, nil
+	// splitted := strings.Split(msg, " ")
+	// num, err := strconv.Atoi(splitted[0])
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// low, err := strconv.Atoi(splitted[1])
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// high, err := strconv.Atoi(splitted[2])
+	// if err != nil {
+	// 	return nil, err
+	// }
 
-	splitted := strings.Split(msg, " ")
-	num, err := strconv.Atoi(splitted[0])
-	if err != nil {
-		return nil, err
-	}
-	low, err := strconv.Atoi(splitted[1])
-	if err != nil {
-		return nil, err
-	}
-	high, err := strconv.Atoi(splitted[2])
-	if err != nil {
-		return nil, err
-	}
-
-	return &Group{
-		Name:   splitted[3],
-		Number: num,
-		Low:    low,
-		High:   high,
-	}, nil
+	// return &Group{
+	// 	Name:   splitted[3],
+	// 	Number: num,
+	// 	Low:    low,
+	// 	High:   high,
+	// }, nil
 }
 
 func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {

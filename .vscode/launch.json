@@ -10,7 +10,8 @@
       "request": "launch",
       "mode": "auto",
       "cwd": "${workspaceFolder}",
-      "program": "${workspaceFolder}/cmd/gonzb"
+      "program": "${workspaceFolder}/cmd/gonzb",
+      "args": ["download", "test.nzb"]
     }
   ]
 }

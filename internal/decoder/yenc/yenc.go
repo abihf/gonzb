@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,9 +26,7 @@ var buffPoll = sync.Pool{
 
 func Decode(out []byte, r io.Reader) (err error) {
 	yr, ok := r.(io.ByteReader)
-	if ok {
-		yr = r.(io.ByteReader)
-	} else {
+	if !ok {
 		yr = bufio.NewReader(r)
 	}
 
@@ -106,6 +104,10 @@ func Decode(out []byte, r io.Reader) (err error) {
 				continue
 			}
 			part = parseYencCmd(line[7:])
+			begin, err := strconv.Atoi(part["begin"])
+			if err == nil {
+				offset = begin
+			}
 			continue
 		}
 
@@ -121,14 +123,17 @@ func Decode(out []byte, r io.Reader) (err error) {
 			footer = parseYencCmd(line[6:])
 			var crcStr string
 			if part != nil {
-				crcStr = footer["pcrc"]
+				crcStr = footer["pcrc32"]
 			} else {
-				crcStr = footer["crc"]
+				crcStr = footer["crc32"]
 			}
 			if crcStr != "" {
-				realCrc := fmt.Sprintf("%d", crc.Sum32())
-				if crcStr != realCrc {
-					fmt.Fprintf(os.Stderr, "CRC not valid, expect %s got %s\n", crcStr, realCrc)
+				recvCrc, _ := strconv.ParseUint(crcStr, 16, 32)
+				realCrc := crc.Sum32()
+
+				if uint32(recvCrc) != realCrc {
+					parseErr = fmt.Errorf("CRC not valid, expect %08x got %08x\n", crcStr, realCrc)
+					continue
 				}
 			}
 

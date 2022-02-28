@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/marusama/semaphore/v2"
+	"github.com/rs/zerolog/log"
 )
 
 type Config struct {
@@ -110,7 +111,9 @@ func (c *Client) ConnectN(max int) (res []*Conn, errors []error) {
 				return
 			}
 
-			fmt.Printf("connecting to %s (%d/%d)\n", c.Host, cLen, c.MaxConn)
+			logger := log.With().Str("host", c.Host).Int("max", c.MaxConn).Logger()
+
+			logger.Debug().Int("len", cLen).Msg("connecting to news server")
 			var inner io.ReadWriteCloser
 			tmpConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port))
 			if err != nil {
@@ -143,7 +146,7 @@ func (c *Client) ConnectN(max int) (res []*Conn, errors []error) {
 				} else {
 					c.busyCount--
 				}
-				fmt.Printf("disconnected from %s (%d/%d)\n", c.Host, c.busyCount+len(c.idleConns), c.MaxConn)
+				logger.Info().Int("len", c.busyCount+len(c.idleConns)).Msg("disconnected from server")
 				return err
 			}
 
@@ -170,8 +173,8 @@ func (c *Client) ConnectN(max int) (res []*Conn, errors []error) {
 				c.busyCount++
 				res = append(res, conn)
 				errors = append(errors, err)
+				logger.Info().Int("len", c.busyCount+len(c.idleConns)).Msg("connected to server")
 			}()
-
 		}(i)
 	}
 	wg.Wait()
@@ -182,6 +185,12 @@ func (c *Client) Len() int {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.busyCount + len(c.idleConns)
+}
+
+func (c *Client) BusyLen() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.busyCount
 }
 
 // func (c *Client) CloseIdle() {
