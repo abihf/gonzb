@@ -26,7 +26,7 @@ type queueItem struct {
 }
 
 type Queue struct {
-	m     sync.Mutex
+	m     sync.RWMutex
 	first *queueItem
 	last  *queueItem
 	len   int
@@ -64,7 +64,7 @@ func (q *Queue) Get() *Job {
 }
 
 func (q *Queue) Len() int {
-	q.m.Lock()
-	defer q.m.Unlock()
+	q.m.RLock()
+	defer q.m.RUnlock()
 	return q.len
 }

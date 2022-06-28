@@ -69,7 +69,7 @@ func Decode(out []byte, r io.Reader) (err error) {
 	for {
 		lineB, err := readLine()
 		if err != nil {
-			return fmt.Errorf("can read line: %w", err)
+			return fmt.Errorf("can not read line: %w", err)
 		}
 		line := strings.TrimSpace(string(lineB))
 		if parseErr != nil {
