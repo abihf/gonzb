@@ -1,70 +1,92 @@
 package nntp
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/textproto"
 	"strings"
-	"sync"
 )
 
 type Conn struct {
 	*textproto.Conn
-	client *Client
+	// client *Client
 
-	mutex  sync.Mutex
-	Closed chan struct{}
+	// mutex  sync.Mutex
+	// Closed chan struct{}
 
-	group *Group
+	group  *Group
+	closed bool
 
-	busy        bool
-	shutingDown bool
+	// busy        bool
+	// shutingDown bool
 }
 
-func (c *Conn) startWork() (func(), bool) {
-	c.mutex.Lock()
-	if c.shutingDown {
-		defer c.mutex.Unlock()
-		c.Close()
-		return nil, false
-	}
-	c.busy = true
-	return func() {
-		c.busy = false
-		c.mutex.Unlock()
-	}, true
+type Config struct {
+	Servers []*ServerConfig `yaml:"servers"`
 }
 
-func (c *Conn) Idle() {
-	c.client.mutex.Lock()
-	defer c.client.mutex.Unlock()
+type ServerConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+	Auth *Auth  `yaml:"auth"`
 
-	c.client.busyCount--
-	c.client.idleConns[c] = true
+	MaxConn int `yaml:"maxConn"`
+
+	TLS    bool     `yaml:"tls"`
+	Cipher []string `yaml:"cipher"`
 }
 
-func (c *Conn) Name() string {
-	return c.client.Host
+type Auth struct {
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
 }
 
-func (c *Conn) Shutdown() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.shutingDown = true
-	if !c.busy {
-		c.Close()
-	}
-}
+// func (c *Conn) startWork() (func(), bool) {
+// 	c.mutex.Lock()
+// 	if c.shutingDown {
+// 		defer c.mutex.Unlock()
+// 		c.Close()
+// 		return nil, false
+// 	}
+// 	c.busy = true
+// 	return func() {
+// 		c.busy = false
+// 		c.mutex.Unlock()
+// 	}, true
+// }
+
+// func (c *Conn) Idle() {
+// 	c.client.mutex.Lock()
+// 	defer c.client.mutex.Unlock()
+
+// 	c.client.busyCount--
+// 	c.client.idleConns[c] = true
+// }
+
+// func (c *Conn) Name() string {
+// 	return c.client.Host
+// }
+
+// func (c *Conn) Shutdown() {
+// 	c.mutex.Lock()
+// 	defer c.mutex.Unlock()
+// 	c.shutingDown = true
+// 	if !c.busy {
+// 		c.Close()
+// 	}
+// }
 
 func (c *Conn) Auth(a *Auth) error {
-	done, ok := c.startWork()
-	if !ok {
-		return io.EOF
-	}
-	defer done()
+	// done, ok := c.startWork()
+	// if !ok {
+	// 	return io.EOF
+	// }
+	// defer done()
 
 	id, err := c.Cmd("AUTHINFO USER %s", a.User)
 	if err != nil {
+		c.checkEOF(err)
 		return err
 	}
 	c.StartResponse(id)
@@ -81,6 +103,7 @@ func (c *Conn) Auth(a *Auth) error {
 	_, _, err = c.ReadResponse(281)
 	c.EndResponse(id)
 	if err != nil {
+		c.checkEOF(err)
 		return err
 	}
 
@@ -88,11 +111,11 @@ func (c *Conn) Auth(a *Auth) error {
 }
 
 func (c *Conn) Capabilities(group string) ([]string, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
-	}
-	defer done()
+	// done, ok := c.startWork()
+	// if !ok {
+	// 	return nil, io.EOF
+	// }
+	// defer done()
 
 	id, err := c.Cmd("CAPABILITIES")
 	if err != nil {
@@ -103,6 +126,7 @@ func (c *Conn) Capabilities(group string) ([]string, error) {
 
 	_, _, err = c.ReadResponse(101)
 	if err != nil {
+		c.checkEOF(err)
 		return nil, err
 	}
 	return c.ReadDotLines()
@@ -136,11 +160,11 @@ func (c *Conn) Groups(groups []string) (*Group, error) {
 }
 
 func (c *Conn) Group(group string) (*Group, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
-	}
-	defer done()
+	// done, ok := c.startWork()
+	// if !ok {
+	// 	return nil, io.EOF
+	// }
+	// defer done()
 
 	id, err := c.Cmd("GROUP %s", group)
 	if err != nil {
@@ -151,6 +175,7 @@ func (c *Conn) Group(group string) (*Group, error) {
 
 	_, _, err = c.ReadResponse(211)
 	if err != nil {
+		c.checkEOF(err)
 		return nil, err
 	}
 	c.group = &Group{
@@ -180,11 +205,11 @@ func (c *Conn) Group(group string) (*Group, error) {
 }
 
 func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
-	}
-	defer done()
+	// done, ok := c.startWork()
+	// if !ok {
+	// 	return nil, io.EOF
+	// }
+	// defer done()
 
 	id, err := c.Cmd("HEAD %s", article)
 	if err != nil {
@@ -195,17 +220,14 @@ func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {
 	return c.ReadMIMEHeader()
 }
 
-type Body interface {
-	io.Reader
-	io.ByteReader
-}
+type BodyCB func(io.Reader) error
 
-func (c *Conn) Body(article string, handler func(Body) error) error {
-	done, ok := c.startWork()
-	if !ok {
-		return io.EOF
-	}
-	defer done()
+func (c *Conn) Body(article string, cb BodyCB) error {
+	// done, ok := c.startWork()
+	// if !ok {
+	// 	return io.EOF
+	// }
+	// defer done()
 	id, err := c.Cmd("BODY %s", article)
 	if err != nil {
 		return err
@@ -215,21 +237,18 @@ func (c *Conn) Body(article string, handler func(Body) error) error {
 
 	line, err := c.ReadLine()
 	if err != nil {
+		c.checkEOF(err)
 		return err
 	}
 	line = strings.TrimLeft(line, " \r\n")
-	if !strings.HasPrefix(strings.TrimLeft(line, " \r\n"), "222 ") {
-		return fmt.Errorf("Invalid response code %s expect 222", line[0:3])
+	if !strings.HasPrefix(line, "222 ") {
+		return fmt.Errorf("invalid response code %s expect 222", line[0:3])
 	}
-	return handler(c.R)
+	return cb(c.R)
 }
 
-type bodyCloser struct {
-	Body
-	done func()
-}
-
-func (d *bodyCloser) Close() error {
-	defer d.done()
-	return nil
+func (c *Conn) checkEOF(err error) {
+	if errors.Is(err, io.EOF) {
+		c.closed = true
+	}
 }
