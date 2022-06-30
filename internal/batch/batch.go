@@ -39,3 +39,13 @@ func (b *Batch) Wait() error {
 	}
 	return nil
 }
+
+func All[Arg any](args []Arg, fn func(Arg) error) error {
+	b := New()
+	for _, arg := range args {
+		b.Run(func() error {
+			return fn(arg)
+		})
+	}
+	return b.Wait()
+}

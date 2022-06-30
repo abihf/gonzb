@@ -10,16 +10,8 @@ import (
 
 type Conn struct {
 	*textproto.Conn
-	// client *Client
-
-	// mutex  sync.Mutex
-	// Closed chan struct{}
-
 	group  *Group
 	closed bool
-
-	// busy        bool
-	// shutingDown bool
 }
 
 type Config struct {
@@ -42,48 +34,7 @@ type Auth struct {
 	Password string `yaml:"password"`
 }
 
-// func (c *Conn) startWork() (func(), bool) {
-// 	c.mutex.Lock()
-// 	if c.shutingDown {
-// 		defer c.mutex.Unlock()
-// 		c.Close()
-// 		return nil, false
-// 	}
-// 	c.busy = true
-// 	return func() {
-// 		c.busy = false
-// 		c.mutex.Unlock()
-// 	}, true
-// }
-
-// func (c *Conn) Idle() {
-// 	c.client.mutex.Lock()
-// 	defer c.client.mutex.Unlock()
-
-// 	c.client.busyCount--
-// 	c.client.idleConns[c] = true
-// }
-
-// func (c *Conn) Name() string {
-// 	return c.client.Host
-// }
-
-// func (c *Conn) Shutdown() {
-// 	c.mutex.Lock()
-// 	defer c.mutex.Unlock()
-// 	c.shutingDown = true
-// 	if !c.busy {
-// 		c.Close()
-// 	}
-// }
-
 func (c *Conn) Auth(a *Auth) error {
-	// done, ok := c.startWork()
-	// if !ok {
-	// 	return io.EOF
-	// }
-	// defer done()
-
 	id, err := c.Cmd("AUTHINFO USER %s", a.User)
 	if err != nil {
 		c.checkEOF(err)
@@ -111,12 +62,6 @@ func (c *Conn) Auth(a *Auth) error {
 }
 
 func (c *Conn) Capabilities(group string) ([]string, error) {
-	// done, ok := c.startWork()
-	// if !ok {
-	// 	return nil, io.EOF
-	// }
-	// defer done()
-
 	id, err := c.Cmd("CAPABILITIES")
 	if err != nil {
 		return nil, err
@@ -160,12 +105,6 @@ func (c *Conn) Groups(groups []string) (*Group, error) {
 }
 
 func (c *Conn) Group(group string) (*Group, error) {
-	// done, ok := c.startWork()
-	// if !ok {
-	// 	return nil, io.EOF
-	// }
-	// defer done()
-
 	id, err := c.Cmd("GROUP %s", group)
 	if err != nil {
 		return nil, err
@@ -182,35 +121,9 @@ func (c *Conn) Group(group string) (*Group, error) {
 		Name: group,
 	}
 	return c.group, nil
-	// splitted := strings.Split(msg, " ")
-	// num, err := strconv.Atoi(splitted[0])
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// low, err := strconv.Atoi(splitted[1])
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// high, err := strconv.Atoi(splitted[2])
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return &Group{
-	// 	Name:   splitted[3],
-	// 	Number: num,
-	// 	Low:    low,
-	// 	High:   high,
-	// }, nil
 }
 
 func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {
-	// done, ok := c.startWork()
-	// if !ok {
-	// 	return nil, io.EOF
-	// }
-	// defer done()
-
 	id, err := c.Cmd("HEAD %s", article)
 	if err != nil {
 		return nil, err
@@ -223,11 +136,6 @@ func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {
 type BodyCB func(io.Reader) error
 
 func (c *Conn) Body(article string, cb BodyCB) error {
-	// done, ok := c.startWork()
-	// if !ok {
-	// 	return io.EOF
-	// }
-	// defer done()
 	id, err := c.Cmd("BODY %s", article)
 	if err != nil {
 		return err

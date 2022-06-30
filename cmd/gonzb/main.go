@@ -13,9 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	configFile = kingpin.Flag("config", "config file").Default("config.yml").String()
-)
+var configFile = kingpin.Flag("config", "config file").Default("config.yml").String()
 
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
@@ -60,12 +58,9 @@ func loadConfig() *downloader.Config {
 
 func downloadSingle(name string) error {
 	d := downloader.New(loadConfig())
-	file, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	n, err := nzb.Parse(file)
+	defer d.Close()
+
+	n, err := nzb.Open(name)
 	if err != nil {
 		return err
 	}

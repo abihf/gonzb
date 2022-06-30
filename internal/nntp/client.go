@@ -102,3 +102,8 @@ func (c *Client) Download(ctx context.Context, groups []string, article string, 
 
 	return conn.Body(article, cb)
 }
+
+func (c *Client) Close() error {
+	c.pool.Release()
+	return nil
+}

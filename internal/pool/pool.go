@@ -30,8 +30,11 @@ func New[C any](conf *Config[C]) *Pool[C] {
 
 func (p *Pool[C]) Get(ctx context.Context) (C, error) {
 	for {
+		p.mu.Lock()
+		conns := p.conns
+		p.mu.Unlock()
 		select {
-		case conn := <-p.conns:
+		case conn := <-conns:
 			if p.conf.Valid != nil && !p.conf.Valid(conn) {
 				p.mu.Lock()
 				p.count--
@@ -82,10 +85,13 @@ func (p *Pool[C]) Put(conn C) {
 
 func (p *Pool[C]) Release() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	conns := p.conns
+	p.conns = make(chan C, p.conf.MaxCon)
+	p.count -= int32(len(conns))
+	p.mu.Unlock()
 
-	for i := 0; i < len(p.conns); i++ {
-		conn := <-p.conns
+	close(conns)
+	for conn := range conns {
 		p.conf.Close(conn)
 	}
 }

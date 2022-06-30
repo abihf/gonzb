@@ -3,7 +3,6 @@ module github.com/abihf/gonzb
 go 1.18
 
 require (
-	github.com/marusama/semaphore/v2 v2.5.0
 	github.com/rs/zerolog v1.27.0
 	golang.org/x/sys v0.0.0-20220627191245-f75cf1eec38b
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6

@@ -1,4 +1,3 @@
 package reporter
 
-type Reporter struct {
-}
+type Reporter struct{}

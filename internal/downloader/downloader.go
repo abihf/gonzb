@@ -23,13 +23,7 @@ type Downloader struct {
 	reporter *reporter.Reporter
 	client   *nntp.Client
 
-	// mutex sync.Mutex
-	// sem semaphore.Semaphore
 	sem chan struct{}
-
-	// resizer  bool
-	// workerId int32
-	// qEmpty   chan bool
 }
 
 func New(conf *Config) *Downloader {
@@ -38,14 +32,15 @@ func New(conf *Config) *Downloader {
 	return d
 }
 
+func (d *Downloader) Close() error {
+	return d.client.Close()
+}
+
 func (d *Downloader) Download(ctx context.Context, n *nzb.Nzb) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	b := batch.New()
-	// errChan := make(chan error)
-
-	// go func() {
 	for _, file := range n.Files {
 		if strings.HasSuffix(file.FileName(), ".par2") {
 			continue
@@ -56,24 +51,14 @@ func (d *Downloader) Download(ctx context.Context, n *nzb.Nzb) error {
 		}
 	}
 	return b.Wait()
-	// 	close(errChan)
-	// }()
-
-	// for {
-	// 	select {
-	// 	case err := <-errChan:
-	// 		return err
-	// 	case <-ctx.Done():
-	// 		return ctx.Err()
-	// 	}
-	// }
 }
 
 func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) func() error {
 	return func() error {
 		semCount := int32(len(nzbFile.Segments))
 		defer func() {
-			for i := int32(0); i < semCount; i++ {
+			for atomic.LoadInt32(&semCount) > 0 {
+				atomic.AddInt32(&semCount, -1)
 				<-d.sem
 			}
 		}()
@@ -121,70 +106,3 @@ func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) func()
 		return b.Wait()
 	}
 }
-
-// func (d *Downloader) GrowWorker() {
-// 	d.mutex.Lock()
-// 	defer d.mutex.Unlock()
-
-// 	if d.resizer || d.queue.Len() == 0 {
-// 		return
-// 	}
-
-// 	d.resizer = true
-// 	go d.runResizer()
-
-// 	ticker := time.NewTicker(10 * time.Second)
-// 	go func() {
-// 		for {
-// 			<-ticker.C
-// 			if !d.runResizer() {
-// 				ticker.Stop()
-// 				return
-// 			}
-// 		}
-// 	}()
-// }
-
-// func (d *Downloader) runResizer() bool {
-// 	d.mutex.Lock()
-// 	qLen := d.queue.Len()
-// 	if qLen <= 0 {
-// 		d.resizer = false
-// 		d.mutex.Unlock()
-// 		d.qEmpty <- true
-// 		return false
-// 	}
-// 	d.mutex.Unlock()
-
-// 	for _, c := range d.clients {
-// 		qLen -= c.BusyLen()
-// 	}
-
-// 	cLen := len(d.clients)
-// 	lastIndex := 0
-// 	for qLen > 0 {
-// 		batch := qLen / cLen
-// 		if batch < 1 {
-// 			batch = 1
-// 		}
-// 		for i := 0; i < cLen; i++ {
-// 			c := d.clients[lastIndex]
-// 			lastIndex = (lastIndex + 1) % cLen
-
-// 			conns, errs := c.ConnectN(batch)
-// 			qLen -= len(conns)
-// 			for _, err := range errs {
-// 				if err != nil {
-// 					log.Error().Stack().Err(err).Str("host", c.Host).Msg("connection failed")
-// 				}
-// 			}
-// 			for _, conn := range conns {
-// 				id := atomic.AddInt32(&d.workerId, 1)
-// 				worker := &Worker{id, conn}
-// 				log.Debug().Int32("id", id).Str("host", c.Host).Msg("creating worker")
-// 				go worker.Consume(&d.queue)
-// 			}
-// 		}
-// 	}
-// 	return true
-// }

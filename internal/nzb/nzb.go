@@ -3,6 +3,7 @@ package nzb
 import (
 	"encoding/xml"
 	"io"
+	"os"
 	"regexp"
 	"strconv"
 )
@@ -56,4 +57,13 @@ func Parse(reader io.ReadCloser) (*Nzb, error) {
 		return nil, err
 	}
 	return &nzb, nil
+}
+
+func Open(path string) (*Nzb, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return Parse(file)
 }
