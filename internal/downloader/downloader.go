@@ -88,21 +88,15 @@ func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) func()
 		defer syscall.Msync(buff, syscall.MS_ASYNC)
 		defer syscall.Munmap(buff)
 
-		b := batch.New()
-		for _, segment := range nzbFile.Segments {
-			id := segment.ID
-			b.Run(func() error {
-				defer func() {
-					atomic.AddInt32(&semCount, -1)
-					<-d.sem
-				}()
+		return batch.All(nzbFile.Segments, func(s *nzb.Segment) error {
+			defer func() {
+				atomic.AddInt32(&semCount, -1)
+				<-d.sem
+			}()
 
-				return d.client.Download(ctx, nzbFile.Groups, id, func(r io.Reader) error {
-					return yenc.Decode(buff, r)
-				})
+			return d.client.Download(ctx, nzbFile.Groups, s.ID, func(r io.Reader) error {
+				return yenc.Decode(buff, r)
 			})
-		}
-
-		return b.Wait()
+		})
 	}
 }
