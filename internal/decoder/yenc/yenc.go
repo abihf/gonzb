@@ -24,142 +24,150 @@ var buffPoll = sync.Pool{
 	},
 }
 
-func Decode(out []byte, r io.Reader) (err error) {
-	yr, ok := r.(io.ByteReader)
-	if !ok {
-		yr = bufio.NewReader(r)
-	}
+func New(out []byte) func(r io.Reader) error {
+	return func(r io.Reader) (err error) {
+		yr, ok := r.(io.ByteReader)
+		if !ok {
+			yr = bufio.NewReader(r)
+		}
 
-	crc := crc32.NewIEEE()
+		crc := crc32.NewIEEE()
 
-	buf := buffPoll.Get().(*bytes.Buffer)
-	defer buffPoll.Put(buf)
+		buf := buffPoll.Get().(*bytes.Buffer)
+		defer buffPoll.Put(buf)
 
-	readLine := func() ([]byte, error) {
-		buf.Reset()
-		cr := false
-		for {
-			b, err := yr.ReadByte()
-			if err != nil {
-				return nil, err
-			}
-
-			if cr {
-				if b == '\n' {
-					return buf.Bytes(), nil
+		readLine := func() ([]byte, error) {
+			buf.Reset()
+			cr := false
+			for {
+				b, err := yr.ReadByte()
+				if err != nil {
+					return nil, err
 				}
-				buf.WriteByte('\r')
-				cr = false
-			}
-			if b == '\r' {
-				cr = true
-				continue
-			} else {
-				buf.WriteByte(b)
-			}
-		}
-	}
 
-	var header map[string]string
-	var part map[string]string
-	var footer map[string]string
-	var parseErr error
-	offset := 0
-	isEscape := false
-	for {
-		lineB, err := readLine()
-		if err != nil {
-			return fmt.Errorf("can not read line: %w", err)
-		}
-		line := strings.TrimSpace(string(lineB))
-		if parseErr != nil {
-			if line == "." {
-				break
+				if cr {
+					if b == '\n' {
+						return buf.Bytes(), nil
+					}
+					buf.WriteByte('\r')
+					cr = false
+				}
+				if b == '\r' {
+					cr = true
+					continue
+				} else {
+					buf.WriteByte(b)
+				}
 			}
-			continue
 		}
 
-		if header == nil && !strings.HasPrefix(line, "=ybegin ") {
-			continue
-		}
-		if footer != nil {
-			if line == "." {
-				return nil
+		var header map[string]string
+		var part map[string]string
+		var footer map[string]string
+		var parseErr error
+		offset := 0
+		isEscape := false
+		for {
+			lineB, err := readLine()
+			if err != nil {
+				return fmt.Errorf("can not read line: %w", err)
 			}
-			continue
-		}
-
-		if strings.HasPrefix(line, "=ybegin ") {
-			if header != nil {
-				parseErr = fmt.Errorf("ybegin marker line found multiple times")
+			line := strings.TrimSpace(string(lineB))
+			if parseErr != nil {
+				if line == "." {
+					break
+				}
 				continue
 			}
-			header = parseYencCmd(line[8:])
-			continue
-		}
 
-		if strings.HasPrefix(line, "=ypart ") {
-			if header == nil {
-				parseErr = fmt.Errorf("found ypart before ybegin")
+			if header == nil && !strings.HasPrefix(line, "=ybegin ") {
 				continue
 			}
-			part = parseYencCmd(line[7:])
-			begin, err := strconv.Atoi(part["begin"])
-			if err == nil {
-				offset = begin
-			}
-			continue
-		}
-
-		if strings.HasPrefix(line, "=yend ") {
 			if footer != nil {
-				parseErr = fmt.Errorf("yend marker line found multiple times")
+				if line == "." {
+					return nil
+				}
 				continue
 			}
-			if header == nil {
-				parseErr = fmt.Errorf("yend marker line cannot appear before ybegin marker line")
-				continue
-			}
-			footer = parseYencCmd(line[6:])
-			var crcStr string
-			if part != nil {
-				crcStr = footer["pcrc32"]
-			} else {
-				crcStr = footer["crc32"]
-			}
-			if crcStr != "" {
-				recvCrc, _ := strconv.ParseUint(crcStr, 16, 32)
-				realCrc := crc.Sum32()
 
-				if uint32(recvCrc) != realCrc {
-					parseErr = fmt.Errorf("CRC not valid, expect %08x got %08x\n", crcStr, realCrc)
+			if strings.HasPrefix(line, "=ybegin ") {
+				if header != nil {
+					parseErr = fmt.Errorf("ybegin marker line found multiple times")
 					continue
 				}
-			}
-
-			continue
-		}
-
-		originOffset := offset
-		for _, b := range lineB {
-			if b == 0x3D {
-				isEscape = true
+				header = parseYencCmd(line[8:])
 				continue
 			}
-			if isEscape {
-				isEscape = false
-				b -= 64
+
+			if strings.HasPrefix(line, "=ypart ") {
+				if header == nil {
+					parseErr = fmt.Errorf("found ypart before ybegin")
+					continue
+				}
+				if part != nil {
+					println("multiple part found", part)
+				}
+				part = parseYencCmd(line[7:])
+				begin, err := strconv.Atoi(part["begin"])
+				if err == nil {
+					offset = begin - 1
+				}
+				if offset < 1000 {
+					println("offset", offset)
+				}
+				continue
 			}
-			out[offset] = b - 42
-			offset++
+
+			if strings.HasPrefix(line, "=yend ") {
+				if footer != nil {
+					parseErr = fmt.Errorf("yend marker line found multiple times")
+					continue
+				}
+				if header == nil {
+					parseErr = fmt.Errorf("yend marker line cannot appear before ybegin marker line")
+					continue
+				}
+				footer = parseYencCmd(line[6:])
+				var crcStr string
+				if part != nil {
+					crcStr = footer["pcrc32"]
+				} else {
+					crcStr = footer["crc32"]
+				}
+				if crcStr != "" {
+					recvCrc, _ := strconv.ParseUint(crcStr, 16, 32)
+					realCrc := crc.Sum32()
+
+					if uint32(recvCrc) != realCrc {
+						parseErr = fmt.Errorf("CRC not valid, expect %08x got %08x", crcStr, realCrc)
+						continue
+					}
+				}
+
+				continue
+			}
+
+			originOffset := offset
+			for _, b := range lineB {
+				if b == 0x3D {
+					isEscape = true
+					continue
+				}
+				if isEscape {
+					isEscape = false
+					b -= 64
+				}
+				out[offset] = b - 42
+				offset++
+			}
+			// for i := originOffset; i < offset; i += 8 {
+			// 	// ptr :=
+			// 	*(*uint64)(unsafe.Pointer(&out)) += 0x2a2a2a2a2a2a2a2a
+			// }
+			crc.Write(out[originOffset:offset])
 		}
-		// for i := originOffset; i < offset; i += 8 {
-		// 	// ptr :=
-		// 	*(*uint64)(unsafe.Pointer(&out)) += 0x2a2a2a2a2a2a2a2a
-		// }
-		crc.Write(out[originOffset:offset])
+		return parseErr
 	}
-	return parseErr
 }
 
 func parseYencCmd(line string) map[string]string {

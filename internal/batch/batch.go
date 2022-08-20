@@ -15,13 +15,16 @@ func New() *Batch {
 	return &Batch{errChan: make(chan error, 1)}
 }
 
-func (b *Batch) Run(fn func() error) {
+type Fn func() error
+
+func (b *Batch) Run(fn Fn) {
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
 		err := fn()
 		if err != nil && atomic.CompareAndSwapInt32(&b.err, 0, 1) {
 			b.errChan <- err
+			close(b.errChan)
 		}
 	}()
 }

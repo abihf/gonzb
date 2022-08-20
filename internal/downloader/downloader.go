@@ -6,10 +6,10 @@ package downloader
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
-	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/abihf/gonzb/internal/batch"
 	"github.com/abihf/gonzb/internal/decoder/yenc"
@@ -27,7 +27,7 @@ type Downloader struct {
 }
 
 func New(conf *Config) *Downloader {
-	d := &Downloader{client: nntp.New(conf.Servers[0])}
+	d := &Downloader{client: nntp.New(conf.Servers[0]), sem: make(chan struct{}, 50)}
 
 	return d
 }
@@ -40,29 +40,21 @@ func (d *Downloader) Download(ctx context.Context, n *nzb.Nzb) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	b := batch.New()
+	g, ctx := errgroup.WithContext(ctx)
 	for _, file := range n.Files {
 		if strings.HasSuffix(file.FileName(), ".par2") {
 			continue
 		}
-		b.Run(d.downloadFile(ctx, file))
+		g.Go(d.downloadFile(ctx, file))
 		for range file.Segments {
 			d.sem <- struct{}{}
 		}
 	}
-	return b.Wait()
+	return g.Wait()
 }
 
-func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) func() error {
-	return func() error {
-		semCount := int32(len(nzbFile.Segments))
-		defer func() {
-			for atomic.LoadInt32(&semCount) > 0 {
-				atomic.AddInt32(&semCount, -1)
-				<-d.sem
-			}
-		}()
-
+func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) batch.Fn {
+	return func() (err error) {
 		fileName := nzbFile.FileName()
 		// logger := log.With().Str("file", fileName).Logger()
 		file, err := os.Create("files/" + fileName)
@@ -81,22 +73,22 @@ func (d *Downloader) downloadFile(ctx context.Context, nzbFile *nzb.File) func()
 			return fmt.Errorf("can not grow file %s to %d: %w", fileName, size, err)
 		}
 
-		buff, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+		buff, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
 		if err != nil {
 			return fmt.Errorf("can not mmap file %s: %w", fileName, err)
 		}
-		defer syscall.Msync(buff, syscall.MS_ASYNC)
 		defer syscall.Munmap(buff)
+		defer syscall.Msync(buff, syscall.MS_ASYNC)
 
-		return batch.All(nzbFile.Segments, func(s *nzb.Segment) error {
-			defer func() {
-				atomic.AddInt32(&semCount, -1)
-				<-d.sem
-			}()
+		dec := yenc.New(buff)
 
-			return d.client.Download(ctx, nzbFile.Groups, s.ID, func(r io.Reader) error {
-				return yenc.Decode(buff, r)
+		g, ctx := errgroup.WithContext(ctx)
+		for _, s := range nzbFile.Segments {
+			article := "<" + s.ID + ">"
+			g.Go(func() error {
+				return d.client.Download(ctx, nzbFile.Groups, article, dec)
 			})
-		})
+		}
+		return g.Wait()
 	}
 }
