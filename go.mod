@@ -3,7 +3,6 @@ module github.com/abihf/gonzb
 go 1.18
 
 require (
-	github.com/marusama/semaphore/v2 v2.5.0
 	github.com/rs/zerolog v1.27.0
 	golang.org/x/sys v0.0.0-20220627191245-f75cf1eec38b
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
@@ -16,5 +15,6 @@ require (
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
+	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
