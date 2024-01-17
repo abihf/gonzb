@@ -15,13 +15,11 @@ import (
 )
 
 type Downloader struct {
-	reporter *reporter.Reporter
+	reporter reporter.Reporter
 	clients  []*nntp.Client
 
 	sem semaphore.Semaphore
 
-	resizer   bool
-	workerId  int32
 	fileCh    chan *DownloadFileRequest
 	articleCh chan *nntp.ArticleRequest
 }
@@ -38,6 +36,7 @@ func New(conf *Config) *Downloader {
 	}
 	d.sem = semaphore.New(500_000_000)
 	go d.fileWorker()
+	go d.reporter.Worker(context.Background())
 	return d
 }
 
