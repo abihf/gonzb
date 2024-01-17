@@ -1,19 +1,22 @@
 package nntp
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/textproto"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Conn struct {
 	*textproto.Conn
 	client *Client
 
-	mutex  sync.Mutex
-	Closed chan struct{}
+	mutex     sync.Mutex
+	connected bool
 
 	group *Group
 
@@ -21,30 +24,72 @@ type Conn struct {
 	shutingDown bool
 }
 
-func (c *Conn) startWork() (func(), bool) {
+func (c *Conn) startWork() (func(), error) {
 	c.mutex.Lock()
 	if c.shutingDown {
 		defer c.mutex.Unlock()
 		c.Close()
-		return nil, false
+		return nil, fmt.Errorf("shuting down")
 	}
+	if !c.connected {
+		err := c.connect()
+		if err != nil {
+			defer c.mutex.Unlock()
+			c.Close()
+			return nil, err
+		}
+	}
+
 	c.busy = true
 	return func() {
 		c.busy = false
 		c.mutex.Unlock()
-	}, true
-}
-
-func (c *Conn) Idle() {
-	c.client.mutex.Lock()
-	defer c.client.mutex.Unlock()
-
-	c.client.busyCount--
-	c.client.idleConns[c] = true
+	}, nil
 }
 
 func (c *Conn) Name() string {
 	return c.client.Host
+}
+
+func (c *Conn) connect() error {
+	var inner io.ReadWriteCloser
+	tmpConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", c.client.Host, c.client.Port))
+	if err != nil {
+		return err
+	}
+	tcpConn := tmpConn.(*net.TCPConn)
+	tcpConn.SetKeepAlive(true)
+	tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	tcpConn.SetLinger(10)
+
+	if c.client.TLS {
+		if c.client.TLSConfig.ServerName == "" {
+			c.client.TLSConfig.ServerName = c.client.Host
+		}
+
+		tlsCon := tls.Client(tcpConn, &c.client.TLSConfig)
+		inner = tlsCon
+	} else {
+		inner = tcpConn
+	}
+
+	c.Conn = textproto.NewConn(inner)
+	_, _, err = c.ReadCodeLine(200)
+	if err != nil {
+		c.Close()
+		return err
+	}
+
+	c.connected = true
+
+	if c.client.Auth != nil {
+		err = c.Auth(c.client.Auth)
+		if err != nil {
+			c.Close()
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Conn) Shutdown() {
@@ -57,12 +102,6 @@ func (c *Conn) Shutdown() {
 }
 
 func (c *Conn) Auth(a *Auth) error {
-	done, ok := c.startWork()
-	if !ok {
-		return io.EOF
-	}
-	defer done()
-
 	id, err := c.Cmd("AUTHINFO USER %s", a.User)
 	if err != nil {
 		return err
@@ -88,9 +127,9 @@ func (c *Conn) Auth(a *Auth) error {
 }
 
 func (c *Conn) Capabilities(group string) ([]string, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
+	done, err := c.startWork()
+	if err != nil {
+		return nil, err
 	}
 	defer done()
 
@@ -136,9 +175,9 @@ func (c *Conn) Groups(groups []string) (*Group, error) {
 }
 
 func (c *Conn) Group(group string) (*Group, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
+	done, err := c.startWork()
+	if err != nil {
+		return nil, err
 	}
 	defer done()
 
@@ -180,9 +219,9 @@ func (c *Conn) Group(group string) (*Group, error) {
 }
 
 func (c *Conn) Head(article string) (textproto.MIMEHeader, error) {
-	done, ok := c.startWork()
-	if !ok {
-		return nil, io.EOF
+	done, err := c.startWork()
+	if err != nil {
+		return nil, err
 	}
 	defer done()
 
@@ -201,12 +240,12 @@ type Body interface {
 }
 
 func (c *Conn) Body(article string, handler func(Body) error) error {
-	done, ok := c.startWork()
-	if !ok {
-		return io.EOF
+	done, err := c.startWork()
+	if err != nil {
+		return err
 	}
 	defer done()
-	id, err := c.Cmd("BODY %s", article)
+	id, err := c.Cmd("BODY <%s>", article)
 	if err != nil {
 		return err
 	}
@@ -219,7 +258,7 @@ func (c *Conn) Body(article string, handler func(Body) error) error {
 	}
 	line = strings.TrimLeft(line, " \r\n")
 	if !strings.HasPrefix(strings.TrimLeft(line, " \r\n"), "222 ") {
-		return fmt.Errorf("Invalid response code %s expect 222", line[0:3])
+		return fmt.Errorf("invalid response code %s expect 222", line[0:3])
 	}
 	return handler(c.R)
 }

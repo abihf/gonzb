@@ -24,7 +24,7 @@ var buffPoll = sync.Pool{
 	},
 }
 
-func Decode(out []byte, r io.Reader) (err error) {
+func Decode(out io.WriterAt, r io.Reader) (err error) {
 	yr, ok := r.(io.ByteReader)
 	if !ok {
 		yr = bufio.NewReader(r)
@@ -48,7 +48,7 @@ func Decode(out []byte, r io.Reader) (err error) {
 				if b == '\n' {
 					return buf.Bytes(), nil
 				}
-				buf.WriteByte('\r')
+				// buf.WriteByte('\r')
 				cr = false
 			}
 			if b == '\r' {
@@ -106,7 +106,7 @@ func Decode(out []byte, r io.Reader) (err error) {
 			part = parseYencCmd(line[7:])
 			begin, err := strconv.Atoi(part["begin"])
 			if err == nil {
-				offset = begin
+				offset = begin - 1
 			}
 			continue
 		}
@@ -132,7 +132,7 @@ func Decode(out []byte, r io.Reader) (err error) {
 				realCrc := crc.Sum32()
 
 				if uint32(recvCrc) != realCrc {
-					parseErr = fmt.Errorf("CRC not valid, expect %08x got %08x\n", crcStr, realCrc)
+					parseErr = fmt.Errorf("crc not valid, expect %08x got %08x", crcStr, realCrc)
 					continue
 				}
 			}
@@ -140,24 +140,46 @@ func Decode(out []byte, r io.Reader) (err error) {
 			continue
 		}
 
-		originOffset := offset
-		for _, b := range lineB {
-			if b == 0x3D {
-				isEscape = true
-				continue
+		outBuf := buffPoll.Get().(*bytes.Buffer)
+		outBuf.Reset()
+		outBuf.Grow(len(lineB))
+
+		err = func() error {
+			defer buffPoll.Put(outBuf)
+
+			for _, b := range lineB {
+				if b == '\r' || b == '\n' {
+					continue
+				}
+				if b == 0x3D {
+					isEscape = true
+					continue
+				}
+				if isEscape {
+					isEscape = false
+					b -= 64
+				}
+				outBuf.WriteByte(b - 42)
 			}
-			if isEscape {
-				isEscape = false
-				b -= 64
+			bytes := outBuf.Bytes()
+			_, err = out.WriteAt(bytes, int64(offset))
+			if err != nil {
+				return err
 			}
-			out[offset] = b - 42
-			offset++
+			// for i := originOffset; i < offset; i += 8 {
+			// 	// ptr :=
+			// 	*(*uint64)(unsafe.Pointer(&out)) += 0x2a2a2a2a2a2a2a2a
+			// }
+			_, err = crc.Write(bytes)
+			if err != nil {
+				return err
+			}
+			return nil
+		}()
+
+		if err != nil {
+			return fmt.Errorf("can not write to output: %w", err)
 		}
-		// for i := originOffset; i < offset; i += 8 {
-		// 	// ptr :=
-		// 	*(*uint64)(unsafe.Pointer(&out)) += 0x2a2a2a2a2a2a2a2a
-		// }
-		crc.Write(out[originOffset:offset])
 	}
 	return parseErr
 }

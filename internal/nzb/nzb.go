@@ -44,7 +44,7 @@ func (f *File) FileSize() (int64, bool) {
 
 type Segment struct {
 	XMLName xml.Name `xml:"segment"`
-	Bytes   uint32   `xml:"bytes,attr"`
+	Bytes   int64    `xml:"bytes,attr"`
 	Number  uint32   `xml:"number,attr"`
 	ID      string   `xml:",chardata"`
 }
